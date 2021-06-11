@@ -334,7 +334,7 @@ contract PledgeContract is Ownable, Pausable, Initializable{
         }
     }
     
-	function setBlockRigHistory(bytes32 rig, uint256 height) onlyOwner public { 
+    function setBlockRigHistory(bytes32 rig, uint256 height) onlyOwner public { 
         blockRigHistory[height] = rig;
     }
 	
