@@ -247,17 +247,19 @@ contract PledgeContract is Ownable, Pausable, Initializable{
         
         _requiredBlockNumber = 8;
         _totalDeduction = 0;
-        _addRigFee = 99000000000000000000;
-        _fuel =	640000000000000000000; // value at _thorHeight + 1 (70000)
-        _fuelDelta = 200000000000000000; 
-        _nextFuel = 5000000000000000000000;
-        _nextFuelDelta = 100000000000000000;
+        _addRigFee = 0;
+        _fuel = 15000000000000000000000; // value at _thorHeight + 1 (70000)
+        _fuelDelta = 130000000000000000; 
+        _nextFuel = 15000000000000000000000;
+        _nextFuelDelta = 130000000000000000;
         _nextFuelHeight = 70000;
          _thorHeight = 69999;
         _migrate = true;
         _defaultRigOwner = address(0);
         _odinContractAddress = address(0);
     }
+    
+
     /**
      * @dev Throws if called by any account other than the bridge.
      */
@@ -310,6 +312,18 @@ contract PledgeContract is Ownable, Pausable, Initializable{
         _defaultRigOwner = owner;
     }
 
+    /**
+     * Migrate process in last day before 70000 height:
+     * 0. Deploy contract with _fuel, _fuelDelta values from old contract, and set _nextFuel, _nextFuelDelta with proper values
+     * 1. Add and bind all rigs
+     * 2. All existing pools must deposit at least 20 * _fuel  into new contract
+     * 3. All existing pools must keep deposit sufficient（1 days fuel) in old contract, and deposit 1 odin into old contract
+     * 4. All nodes must switch to new contract address
+     * 5. Migrate blockRigHistory, and continue to migrate until 69999
+     * 6. Bridge begin to use new contract address at 70000
+     * 7. Miners begin to Withdraw from old contract
+     * 8. Pause old contract
+     */
     function migrateBlockRigHistory(bytes32 [] memory rigs, uint256 [] memory heights) onlyOwner public { 
         require(_migrate, "Migrate is not allowed");
         
@@ -337,7 +351,7 @@ contract PledgeContract is Ownable, Pausable, Initializable{
     function setBlockRigHistory(bytes32 rig, uint256 height) onlyOwner public { 
         blockRigHistory[height] = rig;
     }
-	
+    
     function addRig(bytes32 rig) whenNotPaused public payable{ 
         uint256 amount = msg.value; 
         require(amount >= _addRigFee, "insufficient add rig fee");
@@ -428,40 +442,44 @@ contract PledgeContract is Ownable, Pausable, Initializable{
         return unApprovedRigSet.at(index);
     }
      
+
     /**
      * require fuel * 8 as minimal
      */
     function calcMinimalFuel(uint256 height) public view returns (uint256){ 
-        uint256 requiredMinimalFuel = _fuel.mul(_requiredBlockNumber);
-        if (height <= _thorHeight) return requiredMinimalFuel;//Need 8 blocks fuel during migration period
+    	uint256 minimalFuel = _fuel.mul(_requiredBlockNumber);
+        if (height <= _thorHeight) return minimalFuel;//Need 8 blocks fuel during migration period
         
-        if (height + _requiredBlockNumber >= _nextFuelHeight){//height is larger than nextFuelHeight
-            //uint256 blocksAfterNextHeight = height + _requiredBlockNumber -_nextFuelHeight;
+        if (height + _requiredBlockNumber >= _nextFuelHeight){//height + 8  is larger than nextFuelHeight
+        	uint256 firstFuelAfterNextHeight = _nextFuel;
             uint256 blocksAfterNextHeight = height.add(_requiredBlockNumber).sub(_nextFuelHeight);
             if (blocksAfterNextHeight > _requiredBlockNumber) {
                 blocksAfterNextHeight = _requiredBlockNumber;
+                firstFuelAfterNextHeight = (height.sub(_nextFuelHeight)).mul(_nextFuelDelta) + _nextFuel;
             }
+            uint256 fuelAfterNextHeight = firstFuelAfterNextHeight.mul(blocksAfterNextHeight)  + _nextFuelDelta.mul(blocksAfterNextHeight.sub(1)).mul(blocksAfterNextHeight).div(2);
             
+            uint256 fuelBeforeNextHeight = 0;
             uint256 blocksBeforeNextHeight =  _requiredBlockNumber.sub(blocksAfterNextHeight);
-            //uint256 requiredFuelAfterNextHeight = _nextFuel.mul(blocksAfterNextHeight) + _nextFuelDelta * (blocksAfterNextHeight - 1) * blocksAfterNextHeight / 2;
-            uint256 requiredFuelAfterNextHeight = _nextFuel.mul(blocksAfterNextHeight).add(_nextFuelDelta.mul(blocksAfterNextHeight.sub(1)).mul(blocksAfterNextHeight).div(2)); //blocksAfterNextHeight need -1 because the first one is not added by Fuel Delta
-            //uint256 requiredFuelBeforeNextHeight = _fuel.mul(blocksBeforeNextHeight) + _fuelDelta * (blocksBeforeNextHeight - 1) * blocksBeforeNextHeight  / 2;
-            uint256 requiredFuelBeforeNextHeight = _fuel.mul(blocksBeforeNextHeight).add(_fuelDelta.mul(blocksBeforeNextHeight.sub(1)).mul(blocksBeforeNextHeight).div(2));
-            requiredMinimalFuel = requiredFuelAfterNextHeight.add(requiredFuelBeforeNextHeight);
-
+            if (blocksBeforeNextHeight > 0) {
+                uint256 firstFuelBeforeNextHeight = (height.sub(_thorHeight).sub(1)).mul(_fuelDelta) + _fuel;
+                fuelBeforeNextHeight = firstFuelBeforeNextHeight.mul(blocksBeforeNextHeight) + _fuelDelta.mul(blocksBeforeNextHeight.sub(1)).mul(blocksBeforeNextHeight).div(2);
+            }
+             
+            minimalFuel = fuelAfterNextHeight + fuelBeforeNextHeight;
         }
         else{
-            //requiredMinimalFuel = _fuel.mul(_requiredBlockNumber) + _fuelDelta *_requiredBlockNumber * (_requiredBlockNumber + 1) / 2;
-            requiredMinimalFuel = _fuel.mul(_requiredBlockNumber).add(_fuelDelta.mul(_requiredBlockNumber).mul(_requiredBlockNumber.add(1)).div(2));
+            uint256 firstFuel = (height.sub(_thorHeight).sub(1)).mul(_fuelDelta) + _fuel;
+            minimalFuel = firstFuel.mul(_requiredBlockNumber) + _fuelDelta.mul(_requiredBlockNumber.sub(1)).mul(_requiredBlockNumber).div(2);
         }
         
-        return requiredMinimalFuel;
+        return minimalFuel;
+    
     }
     
     /**
      * Check if Rig has enough deposit to mine a Thor block. 
-     * This method must be called as soon as a Thor SUPERNODE receives a block of tip or catching blocks
-     * SUPERNODE can call this method multiple times through bridge.
+     * This method must be called as soon as a Thor node receives a block of tip or catching blocks
      */
     function isRigEligible(bytes32 rig, uint256 height) whenNotPaused public view returns (bool){ 
         // when the height is new
@@ -489,8 +507,7 @@ contract PledgeContract is Ownable, Pausable, Initializable{
     
     /**
      * Deduct the rig's deposit at the time when 8 blocks after a rig produces a Thor block. 
-     * This method must be called at the time when 8 blocks later thant a Thor SUPERNODE receives a block.
-     * SUPERNODE should call this method once at a specific height through bridge.
+     * This method must be called by the bridge at the time when 8 blocks later than a Thor node receives a block.
      */
     function deductDeposit(bytes32 rig, uint256 height) whenNotPaused onlyBridge public { 
         require(blockRigHistory[height] == 0, "Deduction for this height has been completed already");
